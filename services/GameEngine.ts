@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { CONFIG, VIEWPORT } from '../constants';
-import { PlayerState, InputState, BlockData, BlockMap } from '../types';
+import { BlockData, BlockMap, InputState, PlayerState } from '../types';
 import { LevelGenerator } from './LevelGenerator';
-import { VisualBuilder } from './VisualBuilder';
 import { PhysicsEngine } from './PhysicsEngine';
+import { VisualBuilder } from './VisualBuilder';
 
 export class GameEngine {
   private scene: THREE.Scene;
@@ -146,6 +146,22 @@ export class GameEngine {
       case 'down': this.input.s = isPressed; break;
       case 'left': this.input.a = isPressed; break;
       case 'right': this.input.d = isPressed; break;
+      case 'up-left':
+        this.input.w = isPressed;
+        this.input.a = isPressed;
+        break;
+      case 'up-right':
+        this.input.w = isPressed;
+        this.input.d = isPressed;
+        break;
+      case 'down-left':
+        this.input.s = isPressed;
+        this.input.a = isPressed;
+        break;
+      case 'down-right':
+        this.input.s = isPressed;
+        this.input.d = isPressed;
+        break;
       case 'jump': this.input.space = isPressed; break;
       case 'rotateLeft': 
         if (isPressed) this.targetCameraAngle += Math.PI / 2; 

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 
 interface MobileControlsProps {
   onInput: (action: string, isPressed: boolean) => void;
@@ -18,210 +18,151 @@ const ArrowIcon = ({ rot = 0 }: { rot: number }) => (
 
 const MobileControls: React.FC<MobileControlsProps> = ({ onInput }) => {
   const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
-  
-  // Refs to track state without re-rendering listeners
-  const currentLeftAction = useRef<string | null>(null);
-  const currentRightAction = useRef<string | null>(null);
-  const leftTouchId = useRef<number | null>(null);
-  const rightTouchId = useRef<number | null>(null);
-  const dpadRef = useRef<HTMLDivElement>(null);
 
-  // Stable ref for the callback
-  const onInputRef = useRef(onInput);
-  useEffect(() => { onInputRef.current = onInput; }, [onInput]);
+  const dpadRef = useRef<HTMLDivElement | null>(null);
+  const actionsRef = useRef<HTMLDivElement | null>(null);
 
-  const mapDirToKeys = (dir: string): string[] => {
-    const map: Record<string, string[]> = {
-      'up': ['up'],
-      'down': ['down'],
-      'left': ['left'],
-      'right': ['right'],
-      'up-left': ['up', 'left'],
-      'up-right': ['up', 'right'],
-      'down-left': ['down', 'left'],
-      'down-right': ['down', 'right'],
-    };
-    return map[dir] || [];
+  const activeDirRef = useRef<string | null>(null);
+  const activeActionRef = useRef<string | null>(null);
+  const activeActionPointerIdRef = useRef<number | null>(null);
+  const rotateArmedRef = useRef<boolean>(true);
+
+  const dpadPointerIdRef = useRef<number | null>(null);
+
+  const dirFromDpadPoint = (clientX: number, clientY: number): string | null => {
+    const el = dpadRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+
+    // Normalize to [-1, 1] where center is (0,0)
+    const nx = (x / rect.width) * 2 - 1;
+    const ny = (y / rect.height) * 2 - 1;
+
+    // 8-way by angle; always returns a direction inside the D-pad area.
+    const angle = Math.atan2(ny, nx); // [-pi, pi]
+
+    // Split circle into 8 sectors (each 45deg). Use a +22.5deg offset for nearest.
+    const step = Math.PI / 4;
+    const idx = Math.round((angle + Math.PI) / step) % 8;
+    // idx mapping (starting at left, going CCW):
+    // 0:left,1:up-left,2:up,3:up-right,4:right,5:down-right,6:down,7:down-left
+    switch (idx) {
+      case 0:
+        return 'left';
+      case 1:
+        return 'up-left';
+      case 2:
+        return 'up';
+      case 3:
+        return 'up-right';
+      case 4:
+        return 'right';
+      case 5:
+        return 'down-right';
+      case 6:
+        return 'down';
+      case 7:
+        return 'down-left';
+      default:
+        return null;
+    }
   };
 
-  const setPressed = useCallback((key: string, isPressed: boolean) => {
-    onInputRef.current(key, isPressed);
-    setActiveKeys(prev => {
+  const actionFromPoint = (clientX: number, clientY: number): string | null => {
+    const root = actionsRef.current;
+    if (!root) return null;
+    const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    const actionEl = el?.closest?.('[data-action]') as HTMLElement | null;
+    if (!actionEl || !root.contains(actionEl)) return null;
+    return actionEl.getAttribute('data-action');
+  };
+
+  const setKeyActive = (key: string, isPressed: boolean) => {
+    setActiveKeys((prev) => {
       const next = new Set(prev);
       if (isPressed) next.add(key);
       else next.delete(key);
       return next;
     });
-  }, []);
+  };
 
-  const releaseLeftAll = useCallback(() => {
-    const keys = Array.from(activeKeys).filter(k => k === 'up' || k === 'down' || k === 'left' || k === 'right');
-    keys.forEach(k => setPressed(k, false));
-    currentLeftAction.current = null;
-    leftTouchId.current = null;
-  }, [activeKeys, setPressed]);
-
-  const releaseRightAll = useCallback(() => {
-    const keys = Array.from(activeKeys).filter(k => k === 'jump' || k === 'rotateLeft' || k === 'rotateRight');
-    keys.forEach(k => setPressed(k, false));
-    currentRightAction.current = null;
-    rightTouchId.current = null;
-  }, [activeKeys, setPressed]);
-
-  const applyLeftDir = useCallback((dir: string | null) => {
-    const prevDir = currentLeftAction.current;
-    if (prevDir === dir) return;
-
-    if (prevDir) {
-      const prevKeys = new Set(mapDirToKeys(prevDir));
-      prevKeys.forEach(k => setPressed(k, false));
+  const releaseDir = () => {
+    const prev = activeDirRef.current;
+    if (prev) {
+      onInput(prev, false);
+      setKeyActive(prev, false);
     }
+    activeDirRef.current = null;
+  };
 
-    if (dir) {
-      const nextKeys = new Set(mapDirToKeys(dir));
-      nextKeys.forEach(k => setPressed(k, true));
+  const pressDir = (nextDir: string | null) => {
+    const prev = activeDirRef.current;
+    if (prev === nextDir) return;
+    if (prev) {
+      onInput(prev, false);
+      setKeyActive(prev, false);
     }
-
-    currentLeftAction.current = dir;
-  }, [setPressed]);
-
-  const applyRightAction = useCallback((action: string | null) => {
-    const prevAction = currentRightAction.current;
-    if (prevAction === action) return;
-
-    if (prevAction) setPressed(prevAction, false);
-    if (action) setPressed(action, true);
-    currentRightAction.current = action;
-  }, [setPressed]);
-
-  // --- GLOBAL RELEASE HANDLER ---
-  // We use a global listener to catch releases even if the finger drifts off the button.
-  useEffect(() => {
-    const handleGlobalLift = (e: TouchEvent) => {
-      // 1. Precise Check: Did specific fingers lift?
-      // changedTouches contains ONLY the fingers that just triggered the event (lifted/canceled)
-      for (let i = 0; i < e.changedTouches.length; i++) {
-        const t = e.changedTouches[i];
-        
-        if (t.identifier === leftTouchId.current) {
-          releaseLeftAll();
-        }
-        
-        if (t.identifier === rightTouchId.current) {
-          releaseRightAll();
-        }
-      }
-
-      // 2. Fail-safe: If screen is empty, clear everything.
-      // This catches edge cases where identifiers might get desynced.
-      if (e.touches.length === 0) {
-        releaseLeftAll();
-        releaseRightAll();
-      }
-    };
-
-    // Use passive: false to ensure we can control behavior if needed, though mostly needed for move
-    document.addEventListener('touchend', handleGlobalLift);
-    document.addEventListener('touchcancel', handleGlobalLift);
-
-    return () => {
-      document.removeEventListener('touchend', handleGlobalLift);
-      document.removeEventListener('touchcancel', handleGlobalLift);
-      
-      // Cleanup on unmount
-      if (onInputRef.current) {
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        if (currentLeftAction.current) mapDirToKeys(currentLeftAction.current!).forEach(k => onInputRef.current(k, false));
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        if (currentRightAction.current) onInputRef.current(currentRightAction.current!, false);
-      }
-    };
-  }, [releaseLeftAll, releaseRightAll]);
-
-
-  // --- LEFT HAND: GEOMETRIC D-PAD ---
-  const handleLeftTouch = (e: React.TouchEvent) => {
-    e.preventDefault(); 
-    e.stopPropagation();
-
-    let touch: React.Touch | undefined;
-
-    // If starting, take the new touch
-    if (e.type === 'touchstart') {
-       touch = e.changedTouches[0];
-       leftTouchId.current = touch.identifier;
-    } 
-    // If moving, find our tracked touch
-    else {
-      for (let i = 0; i < e.changedTouches.length; i++) {
-        if (e.changedTouches[i].identifier === leftTouchId.current) {
-          touch = e.changedTouches[i];
-          break;
-        }
-      }
-    }
-
-    if (touch && dpadRef.current) {
-      const rect = dpadRef.current.getBoundingClientRect();
-      const centerX = rect.left + rect.width / 2;
-      const centerY = rect.top + rect.height / 2;
-      const dx = touch.clientX - centerX;
-      const dy = touch.clientY - centerY;
-      
-      // Deadzone in center
-      if (Math.sqrt(dx * dx + dy * dy) < 15) {
-        applyLeftDir(null);
-        return;
-      }
-
-      const angle = Math.atan2(dy, dx) * (180 / Math.PI);
-      let dir = null;
-      
-      // 8-way directional logic
-      if (angle > -22.5 && angle <= 22.5) dir = 'right';
-      else if (angle > 22.5 && angle <= 67.5) dir = 'down-right';
-      else if (angle > 67.5 && angle <= 112.5) dir = 'down';
-      else if (angle > 112.5 && angle <= 157.5) dir = 'down-left';
-      else if (angle > 157.5 || angle <= -157.5) dir = 'left';
-      else if (angle > -157.5 && angle <= -112.5) dir = 'up-left';
-      else if (angle > -112.5 && angle <= -67.5) dir = 'up';
-      else if (angle > -67.5 && angle <= -22.5) dir = 'up-right';
-
-      applyLeftDir(dir);
+    activeDirRef.current = nextDir;
+    if (nextDir) {
+      onInput(nextDir, true);
+      setKeyActive(nextDir, true);
     }
   };
 
-  // --- RIGHT HAND: ELEMENT TRACKING ---
-  const handleRightTouch = (e: React.TouchEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const releaseAction = () => {
+    const prev = activeActionRef.current;
+    if (prev) {
+      onInput(prev, false);
+      setKeyActive(prev, false);
+    }
+    activeActionRef.current = null;
+    activeActionPointerIdRef.current = null;
+  };
 
-    let touch: React.Touch | undefined;
+  const pressAction = (nextAction: string | null, pointerId?: number) => {
+    if (typeof pointerId === 'number') activeActionPointerIdRef.current = pointerId;
 
-    if (e.type === 'touchstart') {
-        touch = e.changedTouches[0];
-        rightTouchId.current = touch.identifier;
-    } else {
-        for (let i = 0; i < e.changedTouches.length; i++) {
-          if (e.changedTouches[i].identifier === rightTouchId.current) {
-            touch = e.changedTouches[i];
-            break;
-          }
-        }
+    const prev = activeActionRef.current;
+
+    // If finger is not on any action, release immediately.
+    if (!nextAction) {
+      if (prev) {
+        onInput(prev, false);
+        setKeyActive(prev, false);
+      }
+      activeActionRef.current = null;
+      return;
     }
 
-    if (!touch) return;
+    // If staying on the same button, do nothing (prevents rotate multi-trigger on jitter).
+    if (prev === nextAction) return;
 
-    // Check what is under the finger
-    const el = document.elementFromPoint(touch.clientX, touch.clientY);
-    const actionEl = el?.closest('[data-action]'); 
-    
-    if (actionEl instanceof HTMLElement && actionEl.dataset.action) {
-      applyRightAction(actionEl.dataset.action);
-    } else {
-      // Finger is on screen but slid off buttons -> cancel input
-      applyRightAction(null);
+    // Switch buttons: release previous first.
+    if (prev) {
+      onInput(prev, false);
+      setKeyActive(prev, false);
     }
+
+    activeActionRef.current = nextAction;
+
+    if (nextAction === 'rotateLeft' || nextAction === 'rotateRight') {
+      // One-shot rotate: only trigger when armed; requires leaving button or lifting finger to re-arm.
+      if (!rotateArmedRef.current) return;
+      rotateArmedRef.current = false;
+
+      setKeyActive(nextAction, true);
+      onInput(nextAction, true);
+      // Keep pressed visual feedback briefly until release; actual release happens on up/leave.
+      return;
+    }
+
+    // Continuous action (jump): press and hold until finger leaves or lifts.
+    onInput(nextAction, true);
+    setKeyActive(nextAction, true);
   };
 
 
@@ -237,11 +178,75 @@ const MobileControls: React.FC<MobileControlsProps> = ({ onInput }) => {
     ${isSmall ? 'text-xs' : 'text-lg font-bold'}
   `;
 
+  const isDirActive = (dir: string) => activeKeys.has(dir);
+
   const DPadBtn = ({ dir, rot }: { dir: string, rot: number }) => (
-    <div className={getBtnClass(activeKeys.has(dir), dir.includes('-'))}>
+    <div className={getBtnClass(isDirActive(dir), dir.includes('-'))}>
       <ArrowIcon rot={rot} />
     </div>
   );
+
+  const dpadHandlers = useMemo(() => {
+    const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (dpadPointerIdRef.current !== null && dpadPointerIdRef.current !== e.pointerId) return;
+      dpadPointerIdRef.current = e.pointerId;
+      (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+      e.preventDefault();
+      pressDir(dirFromDpadPoint(e.clientX, e.clientY));
+    };
+    const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (dpadPointerIdRef.current !== e.pointerId) return;
+      e.preventDefault();
+      pressDir(dirFromDpadPoint(e.clientX, e.clientY));
+    };
+    const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (dpadPointerIdRef.current !== e.pointerId) return;
+      e.preventDefault();
+      releaseDir();
+      dpadPointerIdRef.current = null;
+    };
+    const onPointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (dpadPointerIdRef.current !== e.pointerId) return;
+      e.preventDefault();
+      releaseDir();
+      dpadPointerIdRef.current = null;
+    };
+    return { onPointerDown, onPointerMove, onPointerUp, onPointerCancel };
+  }, []);
+
+  const actionsHandlers = useMemo(() => {
+    const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+      // Allow D-pad and actions simultaneously by tracking separate pointer IDs.
+      activeActionPointerIdRef.current = e.pointerId;
+      (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+      e.preventDefault();
+      rotateArmedRef.current = true;
+      pressAction(actionFromPoint(e.clientX, e.clientY), e.pointerId);
+    };
+    const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (activeActionPointerIdRef.current !== e.pointerId) return;
+      e.preventDefault();
+      const next = actionFromPoint(e.clientX, e.clientY);
+      if (!next) {
+        // Leaving the action buttons re-arms rotate for the next entry.
+        rotateArmedRef.current = true;
+      }
+      pressAction(next);
+    };
+    const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (activeActionPointerIdRef.current !== e.pointerId) return;
+      e.preventDefault();
+      releaseAction();
+      rotateArmedRef.current = true;
+    };
+    const onPointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (activeActionPointerIdRef.current !== e.pointerId) return;
+      e.preventDefault();
+      releaseAction();
+      rotateArmedRef.current = true;
+    };
+    return { onPointerDown, onPointerMove, onPointerUp, onPointerCancel };
+  }, []);
 
   return (
     <div className="absolute inset-0 pointer-events-none flex flex-row items-end justify-between p-4 pb-8 md:p-8 md:pb-12 z-50 select-none touch-none md:hidden">
@@ -249,11 +254,8 @@ const MobileControls: React.FC<MobileControlsProps> = ({ onInput }) => {
       {/* LEFT: 8-WAY D-PAD */}
       <div 
         ref={dpadRef}
-        className="pointer-events-auto w-48 h-48 grid grid-cols-3 grid-rows-3 gap-1 touch-none"
-        onTouchStart={handleLeftTouch}
-        onTouchMove={handleLeftTouch}
-        onTouchEnd={releaseLeftAll}
-        onTouchCancel={releaseLeftAll}
+        className="pointer-events-auto w-48 aspect-square grid grid-cols-3 grid-rows-3 gap-1 touch-none"
+        {...dpadHandlers}
       >
         <DPadBtn dir="up-left" rot={-45} />
         <DPadBtn dir="up" rot={0} />
@@ -270,11 +272,9 @@ const MobileControls: React.FC<MobileControlsProps> = ({ onInput }) => {
 
       {/* RIGHT: ACTION PAD */}
       <div 
+        ref={actionsRef}
         className="pointer-events-auto flex flex-col items-end touch-none -mr-4 -mb-4 p-4"
-        onTouchStart={handleRightTouch}
-        onTouchMove={handleRightTouch}
-        onTouchEnd={releaseRightAll}
-        onTouchCancel={releaseRightAll}
+        {...actionsHandlers}
       >
         
         {/* Rotation Controls */}
